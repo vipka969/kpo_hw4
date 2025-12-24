@@ -1,0 +1,134 @@
+services:
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:v23.2.13
+    container_name: redpanda
+    command:
+      - redpanda
+      - start
+      - --smp 1
+      - --memory 1G
+      - --reserve-memory 0M
+      - --overprovisioned
+      - --node-id 0
+      - --kafka-addr PLAINTEXT://0.0.0.0:29092
+      - --advertise-kafka-addr PLAINTEXT://redpanda:29092
+      - --pandaproxy-addr 0.0.0.0:8082
+      - --advertise-pandaproxy-addr redpanda:8082
+    ports:
+      - "29092:29092"
+      - "8082:8082"
+    healthcheck:
+      test: ["CMD", "rpk", "cluster", "health"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  postgres-order:
+    image: postgres:15-alpine
+    container_name: postgres-order
+    environment:
+      POSTGRES_DB: orders
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_order_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  postgres-payments:
+    image: postgres:15-alpine
+    container_name: postgres-payments
+    environment:
+      POSTGRES_DB: payments
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_payments_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  order-service:
+    container_name: order-service
+    build:
+      context: ./OrderService
+      dockerfile: Dockerfile
+    depends_on:
+      postgres-order:
+        condition: service_healthy
+      redpanda:
+        condition: service_healthy
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      ASPNETCORE_URLS: http://+:8080
+      ConnectionStrings__DefaultConnection: Host=postgres-order;Database=orders;Username=postgres;Password=postgres
+      Kafka__BootstrapServers: redpanda:29092
+      Kafka__OrdersTopic: orders.created
+      Kafka__PaymentsTopic: payments.processed
+    ports:
+      - "5001:8080"
+
+  payments-service:
+    container_name: payments-service
+    build:
+      context: ./PaymentsService
+      dockerfile: Dockerfile
+    depends_on:
+      postgres-payments:
+        condition: service_healthy
+      redpanda:
+        condition: service_healthy
+      order-service:
+        condition: service_started
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      ASPNETCORE_URLS: http://+:8080
+      ConnectionStrings__DefaultConnection: Host=postgres-payments;Database=payments;Username=postgres;Password=postgres
+      Kafka__BootstrapServers: redpanda:29092
+      Kafka__OrdersTopic: orders.created
+      Kafka__PaymentsTopic: payments.processed
+    ports:
+      - "5002:8080"
+
+  api-gateway:
+    container_name: api-gateway
+    build:
+      context: ./ApiGateway
+      dockerfile: Dockerfile
+    depends_on:
+      - order-service
+      - payments-service
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      ASPNETCORE_URLS: http://+:8080
+      ORDER_SERVICE_HOST: order-service
+      ORDER_SERVICE_PORT: 8080
+      PAYMENTS_SERVICE_HOST: payments-service
+      PAYMENTS_SERVICE_PORT: 8080
+    ports:
+      - "8080:8080"
+  frontend:
+    container_name: frontend
+    build:
+      context: ./Frontend
+      dockerfile: Dockerfile
+    depends_on:
+      - api-gateway
+    ports:
+      - "3000:80"
+    environment:
+      - API_GATEWAY_URL=http://api-gateway:8080
+
+volumes:
+  postgres_order_data:
+  postgres_payments_data:
